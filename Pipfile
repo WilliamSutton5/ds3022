@@ -7,12 +7,12 @@ name = "pypi"
 boto3 = "*"
 polars = "*"
 pandas = "*"
-duckdb = "*"
 pyarrow = "*"
 seaborn = "*"
 numpy = "*"
 dbt-duckdb = "*"
 dbt-core = "*"
+duckdb = "*"
 
 [dev-packages]
 
