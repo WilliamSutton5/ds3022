@@ -14,8 +14,8 @@ numpy = "*"
 dbt-duckdb = "*"
 dbt-core = "*"
 requests = "*"
-httpx = "*"
 asyncio = "*"
+httpx = "*"
 
 [dev-packages]
 
