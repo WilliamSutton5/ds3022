@@ -1,3 +1,6 @@
+# 01 - The happy path. No error handling at all.
+# Break it: misspell USER, or turn off Wi-Fi, and read the traceback.
+
 import httpx
 import json
 
@@ -14,3 +17,4 @@ try:
 
 except httpx.HTTPError as e:
   print(e)
+
