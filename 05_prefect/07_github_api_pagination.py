@@ -18,15 +18,11 @@ fetching remote web content, and so the growth here is understanding how
 to cycle through a series of related links to build up all 1000 records.
 """
 
-import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 import duckdb
 import httpx
 from prefect import flow, task
-from prefect.logging import get_run_logger
-from prefect.task_runners import ThreadPoolTaskRunner
 
 
 # commit history for the git/git repository
@@ -36,6 +32,22 @@ URL = "https://api.github.com/repos/git/git/commits"
 PER_PAGE = 100
 PAGES = 10
 
+# duckdb file lives next to this script, no matter where it's run from
+DB_FILE = Path(__file__).parent / "actions.duckdb"
+TABLE = "commits"
+
+
+# turn one nested commit dict from the API into a flat dict (one table row)
+def flatten(c):
+    return {
+        "sha": c["sha"],
+        "author_name": c["commit"]["author"]["name"],
+        "author_login": (c.get("author") or {}).get("login"),   # None if no linked GitHub account
+        "committed_at": c["commit"]["author"]["date"],          # ISO string; DuckDB casts it to TIMESTAMPTZ on insert
+        "message": c["commit"]["message"].splitlines()[0],      # first line only
+        "url": c["html_url"],
+    }
+
 
 # ------ only one task ------
 # create a single prefect task that loops through 10 pages
@@ -43,38 +55,61 @@ PAGES = 10
 # add more tasks and more data if you like, and do more with it.
 # if successful you should have 1000 records in your db.
 
-# local duckdb file, created if missing
-conn = duckdb.connect("actions.duckdb")  
-
 @task(name="ingest", log_prints=True, retries=3, retry_delay_seconds=5)
 def ingest_data():
-    # work with claude to fetch 100 records for each page
-    # and pull 10 pages total. This could be done in series,
-    # or if you want to look at previous prefect .map examples
-    # you could pull some/all pages concurrently.
-    #
-    # for help with github api pagination see
-    # https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api?apiVersion=2026-03-10
-    #
-    # httpx parses it into response.links. The "next" URL already includes 
-    # per_page and page, so params are only needed on the first request. 
-    # The loop ends when there is no "next" link (last page).
+    # fetch PAGES pages of commits by following GitHub's "next" links, then load them into duckdb.
+    # pagination docs: https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api
+    # review runs at https://sds-prefect.pods.uvarc.io/v2/runs
 
-    # this task already comes with a name, retry settings, and anything
-    # you print() is written to the log.
-    # visit https://sds-prefect.pods.uvarc.io/v2/runs to review your flows
+    # follow the "next" links page by page, collecting every commit in one list
+    all_commits = []
+    url = URL
+    params = {"per_page": PER_PAGE}   # only needed on the first request
+    page = 1
+    while url and page <= PAGES:
+        response = httpx.get(url, headers=HEADERS, params=params)
+        response.raise_for_status()   # raise on 4xx/5xx (e.g. bad token, rate limit)
+        commits = response.json()     # JSON text -> list of commit dicts
+        all_commits.extend(commits)
+        print(f"page {page}: {len(commits)} commits ({len(all_commits)} total)")
 
-    # if you need to see a working example of this, see this file in this repo
-    # 04_apis/05_pagination.py
+        url = response.links.get("next", {}).get("url")   # None on the last page
+        params = None   # the next URL already has per_page and page in it
+        page += 1
 
-    # just a placeholder for now. remove the print below this is built out
-    print("something")
+    print(f"fetched {len(all_commits)} commits")
+
+    # flatten every commit into a row dict, ready for DuckDB
+    rows = [flatten(c) for c in all_commits]
+
+    # rebuild the table on every run (no duplicates on reruns/retries), then insert all rows.
+    # the with-block closes the connection automatically, even on errors
+    with duckdb.connect(DB_FILE) as con:
+        con.execute(f"""
+            CREATE OR REPLACE TABLE {TABLE} (
+                sha VARCHAR PRIMARY KEY, author_name VARCHAR, author_login VARCHAR,
+                committed_at TIMESTAMPTZ, message VARCHAR, url VARCHAR
+            )
+        """)
+        # $name placeholders are filled from each row dict's matching key
+        con.executemany(
+            f"INSERT INTO {TABLE} VALUES ($sha, $author_name, $author_login, $committed_at, $message, $url)",
+            rows,
+        )
+        count = con.execute(f"SELECT count(*) FROM {TABLE}").fetchone()[0]
+        print(f"{count} rows in {DB_FILE.name}:{TABLE}")
+        # fail the task (and trigger a retry) if we didn't land exactly 10 x 100 rows
+        if count != PAGES * PER_PAGE:
+            raise ValueError(f"expected {PAGES * PER_PAGE} rows, got {count}")
 
 
 # name the flow something you can identify as yourself
-@flow(name="nem2p-flow")
+@flow(name="wsutton-flow")
 def main_flow():
     ingest_data()
 
-# it doesn't seem this flow executes when you run it. Why?
-# fix it ;^)
+
+# @flow only *defines* main_flow; this block actually calls it when the
+# file is run directly (python 07_github_api_pagination.py), but not on import
+if __name__ == "__main__":
+    main_flow()
