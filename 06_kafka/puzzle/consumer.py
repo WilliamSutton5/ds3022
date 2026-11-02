@@ -31,6 +31,8 @@ def consume_messages():
             consumer.subscribe([TOPIC])
             print(f"Consuming from topic '{TOPIC}' on {KAFKA_BROKER}")
             empty_polls = 0
+            pieces = {}
+            total = None
             while empty_polls < MAX_EMPTY_POLLS:
                 msg = consumer.poll(1)
                 if msg is None:
@@ -51,6 +53,13 @@ def consume_messages():
 
                 # value is the actual json payload of the message content
                 value = json.loads(msg.value())
+                pieces[value["order_no"]] = value["letter"]
+                total = value["total"]
+                
+                if len(pieces) == total:
+                    phrase = "".join(letter for _, letter in sorted(pieces.items()))
+                    print(f"Reassembled phrase: {phrase}")
+                    break
 
                 print(f"key={key} timestamp={ts} value={json.dumps(value)}")
     except Exception as e:
